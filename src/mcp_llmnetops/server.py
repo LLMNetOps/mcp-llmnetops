@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 
 from . import __version__
 from .config import APP_CONFIG_DIR, DeviceConfig, load_devices
-from .platforms import Platform, list_platforms as _list_platforms
+from .platforms import CommandDef, Platform, list_platforms as _list_platforms
 from .ssh_client import DeviceError, DeviceSession
 
 MAX_OUTPUT_CHARS = 50_000
@@ -22,10 +22,13 @@ mcp = FastMCP(
     "mcp-llmnetops",
     instructions=(
         "Read-only network device operations over SSH. "
-        "Workflow: call list_devices to see configured devices, "
-        "list_commands to see the commands allowed for a device's platform, "
-        "then run_command to execute one. Commands are strictly whitelisted "
-        "per platform; anything else is rejected."
+        "Every whitelisted device command is exposed as its own tool, named "
+        "<platform>_<command> (e.g. cisco_ios_show_ip_route, "
+        "mikrotik_ros7_ip_route_print, huawei_vrp_display_version). "
+        "Workflow: call list_devices to see configured devices, then call the "
+        "tool matching the device's platform. Ping tools additionally require "
+        "a 'target' argument (hostname or IP address). "
+        "Commands are strictly whitelisted per platform."
     ),
 )
 
@@ -71,6 +74,33 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n\n... [truncated {len(text) - MAX_OUTPUT_CHARS} characters]"
 
 
+async def _run_fixed_command(
+    device_name: str, platform: Platform, cmd: CommandDef, target: str = ""
+) -> str:
+    """Run one whitelisted command on a device and return its output."""
+    dev = _get_device(device_name)
+    if dev.platform != platform.key:
+        raise ValueError(
+            f"Device '{dev.name}' uses platform '{dev.platform}', but this tool is "
+            f"for '{platform.key}' devices. Use the matching {dev.platform} tool instead."
+        )
+    if cmd.requires_target:
+        if not target:
+            raise ValueError(f"Command '{cmd.name}' requires a 'target' (hostname or IP address).")
+        if not TARGET_RE.match(target):
+            raise ValueError(f"Invalid target '{target}'. Use a plain hostname or IP address.")
+        actual = cmd.command.format(target=target)
+    else:
+        actual = cmd.command
+
+    session = _session_for(dev)
+    try:
+        output = await session.run(actual)
+    except DeviceError as e:
+        raise ValueError(str(e)) from e
+    return _truncate(output) if output else "(no output)"
+
+
 # -- tools ---------------------------------------------------------------------
 
 
@@ -99,58 +129,6 @@ async def list_platforms() -> str:
 
 
 @mcp.tool()
-async def list_commands(device: str) -> str:
-    """List the commands available on a device (whitelisted for its platform).
-
-    Args:
-        device: Device name as returned by list_devices.
-    """
-    dev = _get_device(device)
-    plat = dev.platform_def
-    lines = [f"Device: {dev.name} ({dev.host}:{dev.port}) — platform: {plat.key}"]
-    for c in plat.commands:
-        suffix = " [requires target]" if c.requires_target else ""
-        lines.append(f"- {c.name}{suffix}: {c.description}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def run_command(device: str, command: str, target: str = "") -> str:
-    """Run a whitelisted command on a network device and return its output.
-
-    Args:
-        device: Device name as returned by list_devices.
-        command: Command to run, exactly as listed by list_commands
-            (e.g. "show ip route", "/ip route print", "display version").
-        target: Required for ping commands — the hostname or IP address to ping.
-    """
-    dev = _get_device(device)
-    plat = dev.platform_def
-    cmd = _match_command(plat, command)
-    if cmd is None:
-        available = ", ".join(c.name for c in plat.commands)
-        raise ValueError(
-            f"Command '{command}' is not allowed on {dev.name} ({plat.key}). "
-            f"Available commands: {available}"
-        )
-    if cmd.requires_target:
-        if not target:
-            raise ValueError(f"Command '{cmd.name}' requires a 'target' (hostname or IP address).")
-        if not TARGET_RE.match(target):
-            raise ValueError(f"Invalid target '{target}'. Use a plain hostname or IP address.")
-        actual = cmd.command.format(target=target)
-    else:
-        actual = cmd.command
-
-    session = _session_for(dev)
-    try:
-        output = await session.run(actual)
-    except DeviceError as e:
-        raise ValueError(str(e)) from e
-    return _truncate(output) if output else "(no output)"
-
-
-@mcp.tool()
 async def test_connection(device: str) -> str:
     """Test the SSH connection to a device (connects and opens a shell).
 
@@ -164,6 +142,51 @@ async def test_connection(device: str) -> str:
     except DeviceError as e:
         return f"FAILED: {e}"
     return f"OK: connected to {dev.name} ({dev.host}:{dev.port}) as {dev.username}"
+
+
+# -- per-command tools (one MCP tool per whitelisted command) -------------------
+
+
+def _command_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def _build_command_tool(platform: Platform, cmd: CommandDef):
+    """Build the async tool function for one whitelisted command."""
+    if cmd.requires_target:
+
+        async def runner(device: str, target: str) -> str:
+            return await _run_fixed_command(device, platform, cmd, target)
+
+        runner.__doc__ = (
+            f"{cmd.description} (runs `{cmd.command}` on {platform.description} devices).\n\n"
+            "Args:\n"
+            "    device: Device name as returned by list_devices.\n"
+            "    target: Hostname or IP address to ping."
+        )
+    else:
+
+        async def runner(device: str) -> str:
+            return await _run_fixed_command(device, platform, cmd)
+
+        runner.__doc__ = (
+            f"{cmd.description} (runs `{cmd.command}` on {platform.description} devices).\n\n"
+            "Args:\n"
+            "    device: Device name as returned by list_devices."
+        )
+    return runner
+
+
+def _register_command_tools() -> None:
+    """Register one MCP tool per whitelisted command, for every platform."""
+    for platform in _list_platforms():
+        plat = platform.key.replace("-", "_")
+        for cmd in platform.commands:
+            tool_name = f"{plat}_{_command_slug(cmd.name)}"
+            mcp.tool(_build_command_tool(platform, cmd), name=tool_name)
+
+
+_register_command_tools()
 
 
 # -- daemon helpers ----------------------------------------------------------------

@@ -140,13 +140,38 @@ http://<IP-server>:5758/mcp
 
 ## Tools yang tersedia
 
+Setiap perintah whitelisted terdaftar sebagai **tool MCP tersendiri** (satu tool per
+platform × perintah), sehingga LLM cukup memanggil tool yang tepat tanpa perlu
+menyebutkan string perintah. Total **95 tool**: 3 tool umum + 92 tool per-perintah.
+
+### Tool umum
+
 | Tool | Fungsi |
 |---|---|
 | `list_devices` | Daftar device yang terkonfigurasi |
 | `list_platforms` | Daftar platform yang didukung |
-| `list_commands(device)` | Daftar perintah yang diizinkan untuk device |
-| `run_command(device, command, target?)` | Jalankan perintah whitelisted |
 | `test_connection(device)` | Tes koneksi SSH ke device |
+
+### Tool per-perintah
+
+Nama tool mengikuti skema `<platform>_<perintah>`, dengan platform key memakai
+underscore (mis. `cisco-ios` → `cisco_ios`, `aruba-aos-cx` → `aruba_aos_cx`).
+Semua tool menerima parameter `device` (nama device dari `list_devices`).
+Tool `ping` tambahan menerima parameter wajib `target`.
+
+Contoh nama tool:
+
+| Tool | Perintah yang dijalankan |
+|---|---|
+| `mikrotik_ros7_ip_route_print` | `/ip route print` |
+| `mikrotik_ros7_routing_bgp_session_print` | `/routing bgp session print` |
+| `cisco_ios_show_ip_route` | `show ip route` |
+| `cisco_ios_show_ip_bgp_summary` | `show ip bgp summary` |
+| `cisco_iosxr_show_route` | `show route` |
+| `juniper_junos_show_bgp_neighbor` | `show bgp neighbor` |
+| `huawei_vrp_display_ip_routing_table` | `display ip routing-table` |
+| `aruba_aos_cx_show_bgp` | `show bgp` |
+| `cisco_ios_ping` | `ping <target>` |
 
 Contoh alur penggunaan oleh LLM:
 
@@ -154,16 +179,11 @@ Contoh alur penggunaan oleh LLM:
 list_devices()
   → "- mikrotik-core-01: 192.168.1.1:22 [mikrotik-ros7] user=admin"
 
-list_commands("mikrotik-core-01")
-  → "- /ip route print: Show the IPv4 routing table"
-  → "- /ping [requires target]: Ping a target host or IP address"
-  → ...
+mikrotik_ros7_ip_route_print(device="mikrotik-core-01")
+  → "<routing table output>"
 
-run_command("mikrotik-core-01", "/ip route print")
-  → output routing table
-
-run_command("mikrotik-core-01", "/ping", target="8.8.8.8")
-  → output ping
+cisco_ios_ping(device="cisco-edge-01", target="8.8.8.8")
+  → "<ping output>"
 ```
 
 ## Keamanan
