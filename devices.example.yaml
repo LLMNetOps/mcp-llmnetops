@@ -1,0 +1,57 @@
+# Example device configuration for mcp-llmnetops.
+#
+# Copy this file to devices.yaml and fill in real values.
+# String values may reference environment variables: ${VAR_NAME}
+#
+# Config file resolution order:
+#   1. --config <path>
+#   2. $MCP_LLMNETOPS_CONFIG
+#   3. ./devices.yaml (current working directory)
+#   4. ~/.config/mcp-llmnetops/devices.yaml
+
+devices:
+  # --- MikroTik ---------------------------------------------------------
+  - name: mikrotik-core-01
+    host: 192.168.1.1
+    platform: mikrotik-ros7        # or: mikrotik-ros6
+    username: admin
+    password: ${MIKROTIK_CORE01_PASSWORD}
+    # port: 22
+    # ssh_key: ~/.ssh/id_ed25519   # alternative to password
+    # timeout: 60                  # per-command timeout in seconds
+    # known_hosts: auto            # auto | strict | no-check
+
+  # --- Cisco ------------------------------------------------------------
+  - name: cisco-edge-01
+    host: 10.0.0.1
+    platform: cisco-ios            # or: cisco-iosxe, cisco-iosxr, cisco-nxos
+    username: netops
+    password: ${CISCO_EDGE01_PASSWORD}
+
+  # --- Juniper ----------------------------------------------------------
+  - name: juniper-spine-01
+    host: 10.0.0.2
+    platform: juniper-junos
+    username: netops
+    password: ${JUNIPER_SPINE01_PASSWORD}
+
+  # --- Aruba ------------------------------------------------------------
+  - name: aruba-switch-01
+    host: 10.0.0.3
+    platform: aruba-aos-cx
+    username: netops
+    password: ${ARUBA_SWITCH01_PASSWORD}
+
+  # --- Huawei -----------------------------------------------------------
+  - name: huawei-access-01
+    host: 10.0.0.4
+    platform: huawei-vrp
+    username: netops
+    password: ${HUAWEI_ACCESS01_PASSWORD}
+
+  # --- Ruckus -----------------------------------------------------------
+  - name: ruckus-switch-01
+    host: 10.0.0.5
+    platform: ruckus-fastiron
+    username: netops
+    password: ${RUCKUS_SWITCH01_PASSWORD}
