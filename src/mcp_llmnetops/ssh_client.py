@@ -1,15 +1,17 @@
 """Async SSH client for network devices.
 
-Uses a single persistent shell per device so that per-session settings
-(e.g. Cisco 'terminal length 0') stay in effect across commands. Output is
-collected until the platform-specific prompt pattern appears at the end of
-the buffer.
+Maintains a persistent SSH connection per device and runs each command over
+a one-shot exec channel. Exec channels are used instead of a persistent
+interactive shell because some devices (e.g. certain MikroTik RouterOS
+builds) accept a shell/PTY channel but never emit a prompt or command
+output on it, while their exec channel works reliably. Per-session setup
+commands (e.g. Cisco 'terminal length 0') are re-applied in the same exec
+session as the command they precede.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
-import re
 from pathlib import Path
 
 import asyncssh
@@ -23,13 +25,12 @@ class DeviceError(Exception):
 
 
 class DeviceSession:
-    """Manages a persistent SSH shell to a single network device."""
+    """Manages a persistent SSH connection to a single network device."""
 
     def __init__(self, device: DeviceConfig):
         self.device = device
         self.platform: Platform = device.platform_def
         self._conn: asyncssh.SSHClientConnection | None = None
-        self._channel: asyncssh.SSHClientProcess | None = None
         self._lock = asyncio.Lock()
 
     # -- host key handling ---------------------------------------------------
@@ -122,84 +123,61 @@ class DeviceSession:
         if should_save and kh_path is not None:
             self._save_host_key(kh_path)
 
-    async def _ensure_shell(self) -> None:
-        """Open the connection + interactive shell and run platform setup."""
-        if self._channel is not None and not self._channel.is_closed():
-            return
+    async def _ensure_conn(self) -> None:
+        """Open the SSH connection if it is not already open."""
         if self._conn is None or self._conn.is_closed():
             await self._connect()
-        self._channel = await self._conn.create_process(
-            term_type="vt100", term_modes={asyncssh.PTY_ECHO: False}, errors="replace"
-        )
-        # Discard the login banner up to the first prompt.
-        await self._read_until_prompt(timeout=20)
-        for setup in self.platform.setup_commands:
-            await self._send_raw(setup, timeout=20)
 
-    # -- prompt handling -------------------------------------------------------
+    async def _run_exec(self, command: str, timeout: float) -> str:
+        """Run a single command over an exec channel and return its output.
 
-    @property
-    def _prompt_re(self) -> re.Pattern:
-        return re.compile(self.platform.prompt_pattern)
-
-    async def _read_until_prompt(self, timeout: float) -> str:
-        """Read from the channel until the prompt appears at the end of the buffer."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        buffer = ""
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise DeviceError(
-                    f"Timed out after {timeout:.0f}s waiting for prompt on "
-                    f"{self.device.name}. Last output:\n{buffer[-800:]}"
-                )
-            try:
-                chunk = await asyncio.wait_for(
-                    self._channel.read(), timeout=min(remaining, 10.0)
-                )
-            except asyncio.TimeoutError:
-                continue
-            if chunk is None:
-                raise DeviceError("SSH channel closed unexpectedly")
-            buffer += chunk
-            stripped = buffer.rstrip()
-            m = self._prompt_re.search(stripped)
-            if m and m.end() == len(stripped):
-                return stripped[: m.start()]
-
-    async def _send_raw(self, command: str, timeout: float) -> str:
-        """Send one command line and return its output (echo and prompt removed)."""
-        self._channel.send(command + "\n")
-        output = await self._read_until_prompt(timeout=timeout)
-        lines = output.splitlines()
-        # Remove the echoed command (first line) when present.
-        if lines and lines[0].strip() == command.strip():
-            lines = lines[1:]
-        return "\n".join(lines).strip()
+        Uses a one-shot exec channel rather than a persistent interactive
+        shell. Some devices (e.g. certain MikroTik RouterOS builds) accept a
+        shell/PTY channel but never emit a prompt or command output on it,
+        while their exec channel works reliably. Exec also avoids the
+        fragility of prompt-pattern matching.
+        """
+        full_command = command
+        if self.platform.setup_commands:
+            # Re-apply per-session setup (e.g. disable paging) in the same
+            # exec session so it takes effect for this command.
+            full_command = "\n".join(self.platform.setup_commands) + "\n" + command
+        try:
+            result = await asyncio.wait_for(
+                self._conn.run(full_command, check=False),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise DeviceError(
+                f"Command '{command}' timed out after {timeout:.0f}s on "
+                f"{self.device.name}"
+            ) from None
+        out = result.stdout or ""
+        if result.stderr:
+            out = f"{out}\n{result.stderr}".strip("\n") if out else result.stderr
+        return out.strip()
 
     # -- public API --------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Establish the SSH connection and shell (idempotent)."""
+        """Establish the SSH connection (idempotent)."""
         async with self._lock:
-            await self._ensure_shell()
+            await self._ensure_conn()
 
     async def run(self, command: str, timeout: float | None = None) -> str:
         """Run a command on the device and return its output."""
         async with self._lock:
-            await self._ensure_shell()
+            await self._ensure_conn()
             timeout = timeout or self.device.timeout
             try:
-                return await self._send_raw(command, timeout=timeout)
+                return await self._run_exec(command, timeout=timeout)
             except (asyncssh.Error, OSError, ConnectionError):
                 # Drop the session so the next call reconnects cleanly.
                 await self.close()
                 raise
 
     async def close(self) -> None:
-        """Close the shell and connection."""
-        self._channel = None
+        """Close the connection."""
         if self._conn is not None:
             try:
                 self._conn.close()

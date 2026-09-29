@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 
 from . import __version__
 from .config import APP_CONFIG_DIR, DeviceConfig, load_devices
-from .platforms import Platform, list_platforms
+from .platforms import Platform, list_platforms as _list_platforms
 from .ssh_client import DeviceError, DeviceSession
 
 MAX_OUTPUT_CHARS = 50_000
@@ -93,7 +93,7 @@ async def list_devices() -> str:
 async def list_platforms() -> str:
     """List all supported device platforms and their command counts."""
     lines = []
-    for p in list_platforms():
+    for p in _list_platforms():
         lines.append(f"- {p.key}: {p.description} ({len(p.commands)} commands)")
     return "\n".join(lines)
 
