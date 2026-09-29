@@ -8,7 +8,10 @@ import signal
 import sys
 from pathlib import Path
 
+import inspect
+
 from fastmcp import FastMCP
+from fastmcp.tools.function_tool import FunctionTool
 
 from . import __version__
 from .config import APP_CONFIG_DIR, DeviceConfig, load_devices
@@ -104,7 +107,6 @@ async def _run_fixed_command(
 # -- tools ---------------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_devices() -> str:
     """List all configured network devices with host, port, and platform."""
     devices = _devices()
@@ -119,7 +121,6 @@ async def list_devices() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def list_platforms() -> str:
     """List all supported device platforms and their command counts."""
     lines = []
@@ -128,7 +129,6 @@ async def list_platforms() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def test_connection(device: str) -> str:
     """Test the SSH connection to a device (connects and opens a shell).
 
@@ -142,6 +142,34 @@ async def test_connection(device: str) -> str:
     except DeviceError as e:
         return f"FAILED: {e}"
     return f"OK: connected to {dev.name} ({dev.host}:{dev.port}) as {dev.username}"
+
+
+# -- permissive tool ---------------------------------------------------------------
+
+
+class PermissiveFunctionTool(FunctionTool):
+    """A FunctionTool that tolerates extra (unknown) keyword arguments.
+
+    Some MCP clients/agents pass extra arguments a tool does not declare.
+    Instead of failing with 'unexpected_keyword_argument', this subclass
+    silently drops unknown keys before validation so the call still runs.
+    """
+
+    async def run(self, arguments):
+        sig = inspect.signature(self.fn)
+        valid = {p.name for p in sig.parameters.values()}
+        filtered = {k: v for k, v in arguments.items() if k in valid}
+        return await super().run(filtered)
+
+
+def _register_meta_tools() -> None:
+    """Register the meta tools as permissive tools (tolerate extra args)."""
+    for fn in (list_devices, list_platforms, test_connection):
+        tool = PermissiveFunctionTool.from_function(fn, name=fn.__name__)
+        mcp.add_tool(tool)
+
+
+_register_meta_tools()
 
 
 # -- per-command tools (one MCP tool per whitelisted command) -------------------
@@ -183,7 +211,9 @@ def _register_command_tools() -> None:
         plat = platform.key.replace("-", "_")
         for cmd in platform.commands:
             tool_name = f"{plat}_{_command_slug(cmd.name)}"
-            mcp.tool(_build_command_tool(platform, cmd), name=tool_name)
+            fn = _build_command_tool(platform, cmd)
+            tool = PermissiveFunctionTool.from_function(fn, name=tool_name)
+            mcp.add_tool(tool)
 
 
 _register_command_tools()
