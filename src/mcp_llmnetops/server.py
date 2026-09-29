@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import signal
+import sys
+from pathlib import Path
 
 from fastmcp import FastMCP
 
 from . import __version__
-from .config import DeviceConfig, load_devices
+from .config import APP_CONFIG_DIR, DeviceConfig, load_devices
 from .platforms import Platform, list_platforms
 from .ssh_client import DeviceError, DeviceSession
 
@@ -162,6 +166,64 @@ async def test_connection(device: str) -> str:
     return f"OK: connected to {dev.name} ({dev.host}:{dev.port}) as {dev.username}"
 
 
+# -- daemon helpers ----------------------------------------------------------------
+
+
+def _daemonize(pid_file: Path, log_file: Path) -> None:
+    """Detach from the controlling terminal (Unix double-fork) and redirect stdio.
+
+    After this returns, the caller is the daemon (session leader, no controlling
+    terminal). stdin comes from /dev/null; stdout/stderr go to ``log_file``.
+    The daemon's PID is written to ``pid_file``.
+    """
+    if os.name != "posix":
+        raise SystemExit("--daemon is only supported on Unix/Linux")
+    if os.fork() > 0:
+        os._exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
+    os.close(devnull)
+    if log_fd > 2:
+        os.close(log_fd)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+
+def _stop_daemon(pid_file: Path) -> None:
+    """Send SIGTERM to the daemon recorded in the PID file."""
+    if not pid_file.exists():
+        raise SystemExit(f"No PID file at {pid_file}; is the daemon running?")
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        raise SystemExit(f"Invalid PID file at {pid_file}")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_file.unlink(missing_ok=True)
+        print(f"Process {pid} not running; removed stale PID file.")
+        return
+    except PermissionError:
+        raise SystemExit(f"Permission denied sending SIGTERM to pid {pid}")
+    except OSError as e:
+        # Windows: os.kill on a dead pid raises OSError (WinError 87).
+        if getattr(e, "winerror", None) == 87:
+            pid_file.unlink(missing_ok=True)
+            print(f"Process {pid} not running; removed stale PID file.")
+            return
+        raise
+    print(f"Sent SIGTERM to pid {pid}.")
+
+
 # -- entry point -----------------------------------------------------------------
 
 
@@ -193,8 +255,44 @@ def main() -> None:
         default=5758,
         help="Port for HTTP transports (default: 5758)",
     )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run in the background as a daemon (Unix/Linux only)",
+    )
+    parser.add_argument(
+        "--pid-file",
+        default=None,
+        help="PID file path (default: ~/.config/mcp-llmnetops/mcp-llmnetops.pid)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Log file for daemon stdout/stderr (default: ~/.config/mcp-llmnetops/mcp-llmnetops.log)",
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop a running daemon (reads the PID file and sends SIGTERM)",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
+
+    pid_file = Path(args.pid_file).expanduser() if args.pid_file else APP_CONFIG_DIR / "mcp-llmnetops.pid"
+    log_file = Path(args.log_file).expanduser() if args.log_file else APP_CONFIG_DIR / "mcp-llmnetops.log"
+
+    if args.stop:
+        _stop_daemon(pid_file)
+        return
+
+    if args.daemon:
+        if args.transport == "stdio":
+            raise SystemExit("--daemon requires an HTTP transport (sse or streamable-http)")
+        _daemonize(pid_file, log_file)
+        print(
+            f"[mcp-llmnetops] daemon started, pid={os.getpid()}, "
+            f"listening on http://{args.host}:{args.port}/mcp"
+        )
 
     global _config_override
     _config_override = args.config
