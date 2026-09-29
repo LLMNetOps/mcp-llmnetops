@@ -129,7 +129,7 @@ class DeviceSession:
         if self._conn is None or self._conn.is_closed():
             await self._connect()
         self._channel = await self._conn.create_process(
-            term_type="vt100", echo=False, errors="replace"
+            term_type="vt100", term_modes={asyncssh.PTY_ECHO: False}, errors="replace"
         )
         # Discard the login banner up to the first prompt.
         await self._read_until_prompt(timeout=20)
