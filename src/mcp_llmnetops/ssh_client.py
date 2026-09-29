@@ -8,9 +8,8 @@ the buffer.
 from __future__ import annotations
 
 import asyncio
-import os
+import base64
 import re
-import tempfile
 from pathlib import Path
 
 import asyncssh
@@ -32,29 +31,74 @@ class DeviceSession:
         self._conn: asyncssh.SSHClientConnection | None = None
         self._channel: asyncssh.SSHClientProcess | None = None
         self._lock = asyncio.Lock()
-        self._tmp_known_hosts: Path | None = None
+
+    # -- host key handling ---------------------------------------------------
+
+    def _app_known_hosts_path(self) -> Path:
+        APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        return APP_CONFIG_DIR / "known_hosts"
+
+    def _host_in_known_hosts(self, kh_path: Path) -> bool:
+        """Return True if the device host already has a trusted key in the file."""
+        if not kh_path.is_file() or kh_path.stat().st_size == 0:
+            return False
+        port = self.device.port if self.device.port != 22 else None
+        try:
+            trusted, *_ = asyncssh.match_known_hosts(
+                str(kh_path), self.device.host, self.device.host, port
+            )
+        except Exception:
+            return False
+        return len(trusted) > 0
+
+    def _save_host_key(self, kh_path: Path) -> None:
+        """Append the server host key to the known_hosts file (TOFU)."""
+        if self._conn is None:
+            return
+        key = self._conn.get_server_host_key()
+        if key is None:
+            return
+        host = self.device.host
+        port = self.device.port
+        host_pattern = f"[{host}]:{port}" if port != 22 else host
+        line = (
+            f"{host_pattern} {key.algorithm.decode()} "
+            f"{base64.b64encode(key.public_data).decode()}"
+        )
+        try:
+            with open(kh_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    def _host_key_options(self) -> tuple[str | None, bool]:
+        """Return (known_hosts arg, should_save_new_key) for the device mode.
+
+        - strict:   verify against the default ~/.ssh/known_hosts
+        - no-check: no host key verification
+        - auto:     app-managed known_hosts file (TOFU: accept & save new keys)
+        """
+        mode = self.device.known_hosts
+        if mode == "strict":
+            return "", False
+        if mode == "no-check":
+            return None, False
+        kh_path = self._app_known_hosts_path()
+        if self._host_in_known_hosts(kh_path):
+            return str(kh_path), False
+        return None, True
 
     # -- connection setup ----------------------------------------------------
 
-    def _known_hosts_arg(self) -> str | None:
-        mode = self.device.known_hosts
-        if mode == "strict":
-            return None  # default ~/.ssh/known_hosts, verify strictly
-        if mode == "no-check":
-            fd, name = tempfile.mkstemp(prefix="mcp-llmnetops-kh-")
-            os.close(fd)
-            self._tmp_known_hosts = Path(name)
-            return str(self._tmp_known_hosts)
-        # "auto": app-managed known_hosts file (new keys are accepted & saved)
-        APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        return str(APP_CONFIG_DIR / "known_hosts")
-
     async def _connect(self) -> None:
+        known_hosts, should_save = self._host_key_options()
+        kh_path = self._app_known_hosts_path() if should_save else None
+
         kwargs: dict = dict(
             host=self.device.host,
             port=self.device.port,
             username=self.device.username,
-            known_hosts=self._known_hosts_arg(),
+            known_hosts=known_hosts,
         )
         if self.device.ssh_key:
             key = Path(self.device.ssh_key).expanduser()
@@ -66,10 +110,17 @@ class DeviceSession:
 
         try:
             self._conn = await asyncio.wait_for(asyncssh.connect(**kwargs), timeout=20)
-        except asyncssh.HostKeyError as e:
-            raise DeviceError(f"Host key verification failed for {self.device.host}: {e}") from e
+        except asyncssh.HostKeyNotVerifiable as e:
+            raise DeviceError(
+                f"Host key verification failed for {self.device.host}: {e}"
+            ) from e
         except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
-            raise DeviceError(f"Cannot connect to {self.device.host}:{self.device.port}: {e}") from e
+            raise DeviceError(
+                f"Cannot connect to {self.device.host}:{self.device.port}: {e}"
+            ) from e
+
+        if should_save and kh_path is not None:
+            self._save_host_key(kh_path)
 
     async def _ensure_shell(self) -> None:
         """Open the connection + interactive shell and run platform setup."""
@@ -147,16 +198,10 @@ class DeviceSession:
                 raise
 
     async def close(self) -> None:
-        """Close the shell and connection, releasing temporary resources."""
+        """Close the shell and connection."""
         self._channel = None
         if self._conn is not None:
             try:
                 self._conn.close()
             finally:
                 self._conn = None
-        if self._tmp_known_hosts is not None:
-            try:
-                self._tmp_known_hosts.unlink(missing_ok=True)
-            except OSError:
-                pass
-            self._tmp_known_hosts = None
