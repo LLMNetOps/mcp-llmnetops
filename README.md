@@ -92,7 +92,7 @@ Nilai string bisa memakai environment variable: `${NAMA_VAR}`.
   "mcpServers": {
     "llmnetops": {
       "command": "mcp-llmnetops",
-      "args": ["--config", "C:/path/to/devices.yaml"],
+      "args": ["--transport", "stdio", "--config", "C:/path/to/devices.yaml"],
       "env": {
         "MIKROTIK_CORE01_PASSWORD": "rahasia",
         "CISCO_EDGE01_PASSWORD": "rahasia"
@@ -109,6 +109,7 @@ Nilai string bisa memakai environment variable: `${NAMA_VAR}`.
   "mcpServers": {
     "llmnetops": {
       "command": "mcp-llmnetops",
+      "args": ["--transport", "stdio"],
       "env": {
         "MCP_LLMNETOPS_CONFIG": "C:/path/to/devices.yaml"
       }
@@ -116,6 +117,26 @@ Nilai string bisa memakai environment variable: `${NAMA_VAR}`.
   }
 }
 ```
+
+### Akses via HTTP (streamable-http)
+
+Secara default server berjalan sebagai **HTTP server** di port **5758**,
+bisa diakses di `http://<IP>:5758/mcp`. Cocok untuk client MCP yang mendukung
+transport streamable-HTTP.
+
+```bash
+# jalankan server (default sudah streamable-http di 0.0.0.0:5758)
+mcp-llmnetops --config devices.yaml
+```
+
+Client MCP cukup menunjuk ke endpoint:
+
+```
+http://<IP-server>:5758/mcp
+```
+
+> Catatan: karena default-nya HTTP, client berbasis **stdio** (Claude Desktop,
+> Copilot CLI) harus menambahkan `--transport stdio` seperti contoh di atas.
 
 ## Tools yang tersedia
 
@@ -165,8 +186,10 @@ pytest
 Jalankan server manual:
 
 ```bash
-mcp-llmnetops --config devices.yaml            # stdio (default)
-mcp-llmnetops --transport streamable-http      # HTTP
+mcp-llmnetops --config devices.yaml            # HTTP di http://0.0.0.0:5758/mcp (default)
+mcp-llmnetops --transport stdio                # stdio (untuk client yang launch proses)
+mcp-llmnetops --port 9999                      # ganti port HTTP
+mcp-llmnetops --host 127.0.0.1                 # bind ke localhost saja
 mcp-llmnetops --version
 ```
 

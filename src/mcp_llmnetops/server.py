@@ -178,16 +178,31 @@ def main() -> None:
     )
     parser.add_argument(
         "--transport",
-        default="stdio",
+        default="streamable-http",
         choices=["stdio", "sse", "streamable-http"],
-        help="MCP transport (default: stdio)",
+        help="MCP transport (default: streamable-http, served at http://<host>:<port>/mcp)",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Bind address for HTTP transports (default: 0.0.0.0 = all interfaces)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5758,
+        help="Port for HTTP transports (default: 5758)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args()
 
     global _config_override
     _config_override = args.config
-    mcp.run(transport=args.transport)
+
+    if args.transport in {"sse", "streamable-http"}:
+        mcp.run(transport=args.transport, host=args.host, port=args.port)
+    else:
+        mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
