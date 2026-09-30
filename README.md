@@ -25,16 +25,16 @@ Perintah `ping` membutuhkan parameter `target`.
 
 ## Instalasi
 
-### Dengan pipx (dari GitHub)
+### Dengan pipx
 
 ```bash
-pipx install git+https://github.com/<username>/mcp-llmnetops.git
+pipx install mcp-llmnetops
 ```
 
 ### Dari source
 
 ```bash
-git clone https://github.com/<username>/mcp-llmnetops.git
+git clone https://github.com/ratnoub/mcp-llmnetops.git
 cd mcp-llmnetops
 pipx install .
 # atau untuk development:
